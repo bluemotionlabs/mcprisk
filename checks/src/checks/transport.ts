@@ -46,7 +46,14 @@ function authSummary(outcome: AuthProbeOutcome, status: CheckStatus, httpStatus?
     return 'Server rejects anonymous requests but sends no WWW-Authenticate header.';
   }
   if (outcome === 'unverifiable') {
-    return 'Endpoint unreachable during auth probe.';
+    if (httpStatus === undefined) return 'Endpoint unreachable during auth probe.';
+    if (httpStatus >= 500) {
+      return `Endpoint returned a server error (HTTP ${httpStatus}); whether it requires authentication could not be determined.`;
+    }
+    if (httpStatus === 404 || httpStatus === 405) {
+      return `No MCP endpoint responded at this URL (HTTP ${httpStatus}); authentication could not be probed.`;
+    }
+    return `Endpoint rejected the probe (HTTP ${httpStatus}); whether it requires authentication could not be determined.`;
   }
   if (status === 'fail') {
     return `Server answers anonymous requests (HTTP ${httpStatus}) while exposing non-trivial or unverifiable capabilities - fail per §3.2.`;
@@ -102,11 +109,20 @@ export async function checkTransport(
     let outcome: AuthProbeOutcome;
     let evidence: CheckResult['evidence'] = [];
 
+    // Only a substantive response proves the server served us without
+    // credentials. A gateway error or a missing route proves nothing either way,
+    // and reporting it as "answers anonymous requests while exposing
+    // capabilities" asserts something the response does not support.
+    let degraded = false;
     if (res.status === 401 || res.status === 403) {
       outcome = wwwAuth ? 'required-with-www-auth' : 'required-no-www-auth';
       evidence = wwwAuth ? [{ label: 'WWW-Authenticate', value: wwwAuth }] : [];
-    } else {
+    } else if (res.ok) {
       outcome = 'anonymous';
+    } else {
+      outcome = 'unverifiable';
+      // 5xx is the origin failing, which is transient often enough to retry.
+      degraded = res.status >= 500;
     }
 
     const status = resolveAuthRequiredStatus(outcome, capabilityStatus);
@@ -117,6 +133,7 @@ export async function checkTransport(
       status,
       summary: authSummary(outcome, status, res.status),
       evidence,
+      degraded: degraded || undefined,
     });
   } catch (err) {
     results.push({

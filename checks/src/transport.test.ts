@@ -138,3 +138,60 @@ describe('checkTransport', () => {
     expect(results.find((r) => r.id === 'transport.auth-required')?.status).toBe('fail');
   });
 });
+
+/**
+ * §3.2 previously classed every non-401/403 response as "answers anonymous
+ * requests". In the 2026-07-25 corpus that produced 16 failures against
+ * Cloudflare origin errors and missing routes, asserting anonymous access from
+ * responses that show no such thing.
+ */
+describe('checkTransport auth probe classification', () => {
+  const authCheck = (results: Awaited<ReturnType<typeof checkTransport>>) =>
+    results.find((r) => r.id === 'transport.auth-required')!;
+
+  const probe = async (status: number, headers: Record<string, string> = {}) => {
+    const fetchImpl = mockFetch([
+      { match: '/.well-known/', response: textResponse(404) },
+      { match: 'https://srv.test/mcp', response: textResponse(status, '', headers) },
+    ]);
+    const ctx = makeCtx({ remoteUrl: 'https://srv.test/mcp' }, fetchImpl);
+    return authCheck(await checkTransport(ctx, 'fail'));
+  };
+
+  it('treats a Cloudflare origin error as unverifiable and retryable', async () => {
+    const res = await probe(530);
+    expect(res.status).toBe('unverifiable');
+    expect(res.degraded).toBe(true);
+    expect(res.summary).not.toMatch(/anonymous requests/i);
+  });
+
+  it('treats a 503 the same way', async () => {
+    const res = await probe(503);
+    expect(res.status).toBe('unverifiable');
+    expect(res.degraded).toBe(true);
+  });
+
+  it('treats a missing route as unverifiable, not anonymous access', async () => {
+    const res = await probe(404);
+    expect(res.status).toBe('unverifiable');
+    expect(res.degraded).toBeUndefined();
+    expect(res.summary).toMatch(/no mcp endpoint/i);
+  });
+
+  it('does not claim anonymous access from a rejected probe', async () => {
+    const res = await probe(400);
+    expect(res.status).toBe('unverifiable');
+    expect(res.summary).not.toMatch(/anonymous requests/i);
+  });
+
+  it('still fails a server that genuinely answers anonymously', async () => {
+    const res = await probe(200);
+    expect(res.status).toBe('fail');
+    expect(res.summary).toMatch(/anonymous requests/i);
+  });
+
+  it('still passes a server that demands credentials', async () => {
+    const res = await probe(401, { 'www-authenticate': 'Bearer realm="x"' });
+    expect(res.status).toBe('pass');
+  });
+});

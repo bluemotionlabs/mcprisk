@@ -3,7 +3,7 @@ import { checkVulnerabilities } from './checks/vulnerabilities.js';
 import { jsonResponse, makeCtx, mockFetch, textResponse } from './test-helpers.js';
 
 describe('checkVulnerabilities', () => {
-  it('returns info when there is no npm package', async () => {
+  it('returns info when there is no published package', async () => {
     const ctx = makeCtx({ remoteUrl: 'https://example.com' }, async () => textResponse(500));
     const res = await checkVulnerabilities(ctx);
     expect(res.id).toBe('vulns.osv');
@@ -16,6 +16,20 @@ describe('checkVulnerabilities', () => {
     const ctx = makeCtx({ npmPackage: '@acme/clean' }, fetchImpl);
     const res = await checkVulnerabilities(ctx);
     expect(res.status).toBe('pass');
+  });
+
+  it('queries the PyPI ecosystem for PyPI packages', async () => {
+    const fetchImpl = mockFetch([
+      {
+        match: 'pypi.org/pypi',
+        response: jsonResponse(200, { info: { version: '1.2.3' } }),
+      },
+      { match: 'api.osv.dev', response: jsonResponse(200, { vulns: [] }) },
+    ]);
+    const ctx = makeCtx({ pypiPackage: 'acme-mcp' }, fetchImpl);
+    const res = await checkVulnerabilities(ctx);
+    expect(res.status).toBe('pass');
+    expect(res.summary).toMatch(/PyPI/);
   });
 
   it('fails when OSV returns advisories', async () => {

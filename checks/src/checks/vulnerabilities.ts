@@ -13,24 +13,38 @@ export async function checkVulnerabilities(ctx: CheckContext): Promise<CheckResu
     policyRef: '§4.1',
     title: 'No known vulnerabilities (OSV.dev)',
   };
-  const pkg = ctx.target.npmPackage;
-  if (!pkg) {
+
+  const npm = ctx.target.npmPackage;
+  const pypi = ctx.target.pypiPackage;
+  if (!npm && !pypi) {
     return { ...base, status: 'info', summary: 'No package to query (remote-only server).', evidence: [] };
   }
 
+  // Prefer npm when both are present (same preference as canonical identity).
+  const ecosystem = npm ? 'npm' : 'PyPI';
+  const pkg = (npm ?? pypi)!;
+
   let latestVersion: string | undefined;
   try {
-    const metaRes = await fetchWithTimeout(ctx, `https://registry.npmjs.org/${encodeURIComponent(pkg)}`);
-    if (metaRes.ok) {
-      const meta = (await metaRes.json()) as { 'dist-tags'?: Record<string, string> };
-      latestVersion = meta['dist-tags']?.latest;
+    if (ecosystem === 'npm') {
+      const metaRes = await fetchWithTimeout(ctx, `https://registry.npmjs.org/${encodeURIComponent(pkg)}`);
+      if (metaRes.ok) {
+        const meta = (await metaRes.json()) as { 'dist-tags'?: Record<string, string> };
+        latestVersion = meta['dist-tags']?.latest;
+      }
+    } else {
+      const metaRes = await fetchWithTimeout(ctx, `https://pypi.org/pypi/${encodeURIComponent(pkg)}/json`);
+      if (metaRes.ok) {
+        const meta = (await metaRes.json()) as { info?: { version?: string } };
+        latestVersion = meta.info?.version;
+      }
     }
   } catch {
     // version lookup is best-effort; fall back to package-name-only OSV query
   }
 
   const queryBody: { package: { name: string; ecosystem: string; version?: string } } = {
-    package: { name: pkg, ecosystem: 'npm' },
+    package: { name: pkg, ecosystem },
   };
   if (latestVersion) {
     queryBody.package.version = latestVersion;
@@ -43,14 +57,19 @@ export async function checkVulnerabilities(ctx: CheckContext): Promise<CheckResu
       body: JSON.stringify(queryBody),
     });
     if (!res.ok) {
-      return { ...base, status: 'unverifiable', summary: `OSV.dev error (HTTP ${res.status}).`, evidence: [] };
+      return { ...base, status: 'unverifiable', summary: `OSV.dev error (HTTP ${res.status}).`, evidence: [], degraded: true };
     }
     const body = (await res.json()) as { vulns?: Array<{ id: string; summary?: string }> };
     const vulns = body.vulns ?? [];
 
     const summaryVersion = latestVersion ? ` @${latestVersion}` : '';
     if (vulns.length === 0) {
-      return { ...base, status: 'pass', summary: `No advisories on record for ${pkg}${summaryVersion}.`, evidence: [] };
+      return {
+        ...base,
+        status: 'pass',
+        summary: `No advisories on record for ${pkg}${summaryVersion} (${ecosystem}).`,
+        evidence: [],
+      };
     }
     const evidence: Evidence[] = vulns.slice(0, 10).map((v) => ({
       label: v.id,
@@ -60,10 +79,10 @@ export async function checkVulnerabilities(ctx: CheckContext): Promise<CheckResu
     return {
       ...base,
       status: 'fail',
-      summary: `${vulns.length} advisory(ies) on record for ${pkg}${summaryVersion} - review whether the evaluated version is affected.`,
+      summary: `${vulns.length} advisory(ies) on record for ${pkg}${summaryVersion} (${ecosystem}) - review whether the evaluated version is affected.`,
       evidence,
     };
   } catch (err) {
-    return { ...base, status: 'unverifiable', summary: `OSV.dev unreachable: ${errMsg(err)}`, evidence: [] };
+    return { ...base, status: 'unverifiable', summary: `OSV.dev unreachable: ${errMsg(err)}`, evidence: [], degraded: true };
   }
 }
