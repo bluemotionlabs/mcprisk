@@ -75,13 +75,22 @@ export const POISON_PATTERNS: PoisonPattern[] = [
   },
   {
     name: 'cross-tool shadowing',
-    regex: /\b(instead\s+of|rather\s+than|in\s+place\s+of|before\s+(?:using|calling))\s+(?:the\s+)?[`'"]?[\w.-]+[`'"]?\s*(tool|server|function)?/i,
+    // Capture group 1 is the referenced identifier, group 2 the optional noun
+    // phrase. Both are needed by the context filter: the attack is redirecting the
+    // model to or away from ANOTHER server's tool, so a bare English word
+    // ("instead of asking") and a reference to this server's own tool are both
+    // benign. The noun is allowed to sit a couple of words out so that a
+    // multi-word reference ("the built-in email tool") still registers as one.
+    // See isContextualFalsePositive().
+    regex: /\b(?:instead\s+of|rather\s+than|in\s+place\s+of|before\s+(?:using|calling))\s+(?:the\s+)?[`'"]?([\w.-]+)[`'"]?((?:\s+[\w.-]+){0,2}\s*(?:tool|server|function))?/i,
     severity: 'warn',
   },
   {
     name: 'pseudo-system markup',
-    // fake chat/role/instruction delimiters models may treat as privileged
-    regex: /<\/?\s*(system|assistant|user|important|hidden|secret|instructions?)\s*>/i,
+    // fake chat/role/instruction delimiters models may treat as privileged.
+    // <important> is deliberately absent: it is a mainstream, documented prompt
+    // idiom rather than an impersonation of a privileged channel.
+    regex: /<\/?\s*(system|assistant|user|hidden|secret|instructions?)\s*>/i,
     severity: 'fail',
   },
   {
@@ -92,17 +101,151 @@ export const POISON_PATTERNS: PoisonPattern[] = [
   },
   {
     name: 'non-http URI scheme',
-    // javascript:/data:/vbscript: payloads; file: local reads
-    regex: /\b(javascript|data|vbscript|file):[^\s)"']{4,}/i,
+    // javascript:/vbscript:/file: are payload-bearing on sight. data: is not:
+    // schemas legitimately document accepted image formats ("data:image/png;base64,..."),
+    // so it only counts with an actual embedded payload of meaningful length.
+    regex: /\b(?:javascript|vbscript|file):[^\s)"']{4,}|\bdata:[\w/+.-]+;base64,[A-Za-z0-9+/=]{40,}/i,
     severity: 'fail',
   },
   {
     name: 'embedded URL',
-    regex: /https?:\/\/(?!(?:www\.)?(github\.com|docs\.|.*\.example\.com))[^\s)"']{8,}/i,
+    // Host allow-listing happens in the context filter, which knows the server's
+    // own domains. A vendor linking its own docs is not an exfiltration signal;
+    // an unrelated third-party host in a tool description is.
+    regex: /https?:\/\/[^\s)"'`<>]{8,}/i,
     severity: 'warn',
     scope: 'description',
   },
 ];
+
+/** Hosts that are never treated as third-party in a tool description. */
+const NEUTRAL_URL_HOSTS = [/^(www\.)?github\.com$/i, /^docs\./i, /(^|\.)example\.com$/i, /(^|\.)example\.org$/i];
+
+/**
+ * What the scan knows about the server beyond its raw text. Without this the
+ * pattern set cannot distinguish self-reference from cross-server redirection,
+ * which was the dominant source of false positives in the 2026-07 corpus.
+ */
+export interface PoisonScanContext {
+  /** Tool names exposed by this same server, lowercased. */
+  toolNames: Set<string>;
+  /** Domains this server legitimately owns (its own endpoint, its vendor domain). */
+  ownHosts: string[];
+}
+
+/** Reverse-DNS registry names encode the vendor domain: ai.acme/server -> acme.ai */
+function vendorHostFromRegistryName(registryName: string | undefined): string | undefined {
+  if (!registryName) return undefined;
+  const namespace = registryName.split('/')[0];
+  const labels = namespace?.split('.').filter(Boolean) ?? [];
+  if (labels.length < 2) return undefined;
+  return [...labels].reverse().join('.').toLowerCase();
+}
+
+export function buildPoisonScanContext(surface: ToolSurface, target?: PoisonTargetInfo): PoisonScanContext {
+  const ownHosts: string[] = [];
+  if (target?.remoteUrl) {
+    try {
+      const host = new URL(target.remoteUrl).hostname.toLowerCase();
+      ownHosts.push(host);
+      // MCP endpoints almost always sit on an api./mcp. subdomain while the
+      // vendor's docs live on the parent, so treat one level up as own too.
+      const labels = host.split('.');
+      if (labels.length > 2) ownHosts.push(labels.slice(1).join('.'));
+    } catch {
+      // Unparseable endpoint just means no host to allow-list.
+    }
+  }
+  const vendorHost = vendorHostFromRegistryName(target?.registryName);
+  if (vendorHost) ownHosts.push(vendorHost);
+  return {
+    toolNames: new Set(surface.tools.map((t) => t.name.toLowerCase())),
+    ownHosts,
+  };
+}
+
+/** The subset of ScanTarget the poisoning scan needs; keeps this check free of resolver types. */
+export interface PoisonTargetInfo {
+  remoteUrl?: string;
+  registryName?: string;
+}
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function isOwnOrNeutralHost(host: string, ctx: PoisonScanContext): boolean {
+  if (NEUTRAL_URL_HOSTS.some((re) => re.test(host))) return true;
+  return ctx.ownHosts.some((own) => host === own || host.endsWith(`.${own}`));
+}
+
+/**
+ * Determiners and pronouns naming no particular tool. "before calling this tool"
+ * and "instead of any other tool" are generic usage notes, so they stay benign
+ * even though the noun is present.
+ */
+const GENERIC_REFERENTS = new Set([
+  'this', 'that', 'these', 'those', 'the', 'a', 'an', 'any', 'other', 'another',
+  'each', 'some', 'it', 'its', 'them', 'their', 'such', 'either', 'both', 'no',
+]);
+
+/**
+ * A tool identifier looks like code, not prose: snake_case, dotted, or camelCase.
+ * "asking" and "averaging" are English; "get_user_email" is a tool.
+ *
+ * Kebab-case is deliberately excluded: MCP tool names conventionally use
+ * snake_case, while hyphenated English ("dead-end", "read-only") is common in
+ * descriptions. A hyphenated name that really is a tool on this server is still
+ * caught by the toolNames lookup, so the only cost is under-flagging references
+ * to foreign kebab-case tools, which is the safer direction to err.
+ */
+function looksLikeToolIdentifier(word: string): boolean {
+  if (word.length < 3) return false;
+  if (GENERIC_REFERENTS.has(word)) return false;
+  return /[_.]/.test(word) || /[a-z][A-Z]/.test(word);
+}
+
+/**
+ * Second-stage filter: given a pattern hit, decide whether the surrounding
+ * context makes it benign. Returning true drops the hit entirely.
+ */
+export function isContextualFalsePositive(
+  patternName: string,
+  match: RegExpExecArray,
+  ctx: PoisonScanContext,
+): boolean {
+  if (patternName === 'cross-tool shadowing') {
+    // The identifier class includes '.' so it can match dotted tool names, which
+    // means a sentence-ending period rides along ("...before calling foo_bar.").
+    const identifier = (match[1] ?? '').toLowerCase().replace(/[.\-]+$/, '');
+    const noun = match[2];
+    // "instead of the X tool" states the redirection outright, unless X names no
+    // particular tool ("before calling this tool").
+    if (noun) return GENERIC_REFERENTS.has(identifier);
+    // Pointing at one of its own tools is ordinary sequencing guidance.
+    if (ctx.toolNames.has(identifier)) return true;
+    // Anything that is not shaped like a tool name is just English prose.
+    return !looksLikeToolIdentifier(identifier);
+  }
+
+  if (patternName === 'embedded URL') {
+    const host = hostOf(match[0]);
+    if (!host) return true;
+    return isOwnOrNeutralHost(host, ctx);
+  }
+
+  if (patternName === 'pseudo-system markup') {
+    // "https://host/pay/<id>?s=<secret>" is a URL template, not a fake channel.
+    const before = match.input.slice(Math.max(0, match.index - 80), match.index);
+    return /https?:\/\/\S*$/.test(before);
+  }
+
+  return false;
+}
 
 /**
  * Recursively collect human-readable string fields from a JSON Schema. These
@@ -137,7 +280,8 @@ interface ScanItem {
   kind: 'description' | 'schema';
 }
 
-export function checkPoisoning(surface: ToolSurface): CheckResult {
+export function checkPoisoning(surface: ToolSurface, target?: PoisonTargetInfo): CheckResult {
+  const scanContext = buildPoisonScanContext(surface, target);
   const base = {
     id: 'poisoning.patterns',
     policyRef: '§5.1–§5.4',
@@ -199,6 +343,7 @@ export function checkPoisoning(surface: ToolSurface): CheckResult {
       if (item.kind === 'schema' && pattern.scope === 'description') continue;
       const match = pattern.regex.exec(item.text);
       if (!match) continue;
+      if (isContextualFalsePositive(pattern.name, match, scanContext)) continue;
       const critical = pattern.severity === 'critical';
       if (critical) criticalHits++;
       evidence.push({

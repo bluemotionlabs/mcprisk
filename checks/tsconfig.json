@@ -11,7 +11,14 @@
     "isolatedModules": true,
     "declaration": true,
     "sourceMap": true,
-    "outDir": "dist"
+    "outDir": "dist",
+    // The library ships into a Cloudflare Worker, so Node's globals are kept
+    // out on purpose: a check reaching for `process` or `Buffer` would compile
+    // and then fail at runtime. This only holds if test files are excluded
+    // below, because vitest's types pull in a `/// <reference types="node" />`
+    // that would otherwise leak Node globals across the whole project.
+    "types": []
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/scan.ts", "src/test-helpers.ts", "src/**/*.test.ts"]
 }

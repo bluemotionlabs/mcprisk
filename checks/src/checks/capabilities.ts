@@ -4,7 +4,7 @@
  * The tool surface is obtained WITHOUT ever executing untrusted code:
  *   1. Remote servers: a standard MCP initialize + tools/list over
  *      streamable HTTP. A 401 here is signal, not failure (feeds §3.2).
- *   2. npm packages: the published tarball is fetched (size-capped,
+ *   2. npm / PyPI packages: the published archive is fetched (size-capped,
  *      streamed, never executed) and statically scanned for risk-bearing
  *      capabilities and description strings.
  * If neither source yields anything, the result is 'unverifiable' - which
@@ -40,13 +40,35 @@ export const RISK_PATTERNS: Array<{ category: RiskCategory; label: string; regex
   { category: 'credential-access', label: 'credential/env access', regex: /\b(process\.env|os\.environ)\s*[.[][^\s\]]*\b(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)/i },
 ];
 
-/** Same categories applied to tool names/descriptions when we have real tool metadata. */
+/**
+ * Same categories applied to tool names/descriptions when we have real tool metadata.
+ *
+ * credential-access is deliberately absent. A tool description mentioning "api key"
+ * or "token" is almost always documenting its own auth requirement, which every
+ * authenticated API tool does, so the pattern fired on ordinary tools
+ * (quote_lifetime_license, list_applications) and then propagated into the
+ * toxicReadEgress fail rule below. Credential access is only claimed from package
+ * source, where `process.env.X_TOKEN` is direct evidence rather than prose.
+ */
 const TOOL_TEXT_RISKS: Array<{ category: RiskCategory; regex: RegExp }> = [
   { category: 'process-execution', regex: /\b(shell|exec|command|terminal|bash|run[_ ]?(command|script))\b/i },
   { category: 'filesystem', regex: /\b(delete|remove|write|overwrite|move)[_ ]?(file|directory|folder|path)|filesystem\b/i },
   { category: 'network-egress', regex: /\b(http[_ ]?request|fetch[_ ]?url|curl|webhook|send[_ ]?request)\b/i },
-  { category: 'credential-access', regex: /\b(credential|api[_ ]?key|token|secret|password)\b/i },
 ];
+
+/**
+ * A package registry or archive fetch failed for a reason that is not "the
+ * package does not exist". `transient` separates an outage worth retrying from
+ * a genuine 404, so a bad npm day cannot be reported as "no public source".
+ */
+class UpstreamUnavailable extends Error {
+  readonly transient: boolean;
+  constructor(detail?: string) {
+    super(detail ?? 'package not published');
+    this.name = 'UpstreamUnavailable';
+    this.transient = detail !== undefined;
+  }
+}
 
 export async function getToolSurface(ctx: CheckContext): Promise<ToolSurface> {
   const surface: ToolSurface = { source: 'none', tools: [], sourceRiskHits: [] };
@@ -67,12 +89,30 @@ export async function getToolSurface(ctx: CheckContext): Promise<ToolSurface> {
   // TODO(v1.1): try directory metadata (some directories index tool lists).
 
   if (ctx.target.npmPackage) {
-    const pkgScan = await tryTarballScan(ctx, ctx.target.npmPackage);
-    if (pkgScan) {
-      surface.source = 'package-source';
-      surface.tools = pkgScan.descriptionTools;
-      surface.sourceRiskHits = pkgScan.hits;
-      return surface;
+    try {
+      const pkgScan = await tryNpmTarballScan(ctx, ctx.target.npmPackage);
+      if (pkgScan) {
+        surface.source = 'package-source';
+        surface.tools = pkgScan.descriptionTools;
+        surface.sourceRiskHits = pkgScan.hits;
+        return surface;
+      }
+    } catch (err) {
+      if (err instanceof UpstreamUnavailable && err.transient) surface.degraded = true;
+    }
+  }
+
+  if (ctx.target.pypiPackage) {
+    try {
+      const pkgScan = await tryPypiSdistScan(ctx, ctx.target.pypiPackage);
+      if (pkgScan) {
+        surface.source = 'package-source';
+        surface.tools = pkgScan.descriptionTools;
+        surface.sourceRiskHits = pkgScan.hits;
+        return surface;
+      }
+    } catch (err) {
+      if (err instanceof UpstreamUnavailable && err.transient) surface.degraded = true;
     }
   }
 
@@ -87,6 +127,16 @@ export function checkCapabilities(surface: ToolSurface): CheckResult {
   };
 
   if (surface.source === 'none') {
+    if (surface.degraded) {
+      return {
+        ...base,
+        status: 'unverifiable',
+        summary:
+          'Tool surface could not be inspected because the package registry was unavailable. This reflects a scanner outage, not the server.',
+        evidence: [],
+        degraded: true,
+      };
+    }
     return {
       ...base,
       status: 'unverifiable',
@@ -309,17 +359,125 @@ function parseFirstSseJson(text: string): { result?: unknown } | undefined {
   return undefined;
 }
 
-/* ---------------- npm: static tarball scan (never executed) ---------------- */
+/* ---------------- package archive: static scan (never executed) ---------------- */
 
 interface TarballScan {
   hits: Array<RiskHit & { label?: string }>;
   descriptionTools: ToolInfo[];
 }
 
-async function tryTarballScan(ctx: CheckContext, pkg: string): Promise<TarballScan | undefined> {
+function stripArchiveRoot(name: string): string {
+  const i = name.indexOf('/');
+  return i === -1 ? name : name.slice(i + 1);
+}
+
+/** Vendored or generated code: never the server's own authored behaviour. */
+const VENDORED_RE = /(^|\/)(node_modules|__pycache__|vendor)\//;
+const METADATA_RE = /\.(dist-info|egg-info)\//;
+
+/**
+ * Packaging, test and example code. These reach the archive but are not the MCP
+ * server's runtime, so capabilities found here are not capabilities the server
+ * exposes to a model. In the 2026-07 corpus scripts/install.js alone produced
+ * more §2 hits than every other file combined, purely because npm install scripts
+ * necessarily use child_process and fs.
+ *
+ * NOTE: an install script spawning processes IS a real supply-chain risk, it is
+ * just a §1 provenance/package-hygiene finding rather than a §2 capability-scope
+ * one. Reporting it as "this server exposes process execution to the model" is a
+ * different and false claim. TODO(v1.1): surface it in package-hygiene instead.
+ */
+const NON_RUNTIME_RE =
+  /(^|\/)(scripts?|tests?|__tests__|__mocks__|spec|examples?|docs?|benchmarks?|fixtures)\//i;
+const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]s$|_test\.py$|^test_.*\.py$/i;
+
+/** Bundled output: contains transitive dependency code inlined, so it over-reports. */
+const BUNDLED_RE = /(^|\/)(dist|build|out|bundle)\//i;
+const MINIFIED_RE = /\.min\.[cm]?js$/i;
+
+/** True when the archive ships readable authored source, making bundled output redundant. */
+function hasAuthoredSourceTree(names: string[]): boolean {
+  return names.some((n) => {
+    const rel = stripArchiveRoot(n);
+    if (!SOURCE_FILE_RE.test(rel)) return false;
+    if (VENDORED_RE.test(rel) || NON_RUNTIME_RE.test(rel) || BUNDLED_RE.test(rel)) return false;
+    return true;
+  });
+}
+
+/**
+ * Exported for testing. `preferSource` is set when the package ships an authored
+ * source tree, in which case bundled output is skipped as a duplicate view of the
+ * same code carrying its dependencies' capabilities as well as its own.
+ */
+export function shouldScanSourceFile(name: string, preferSource = false): boolean {
+  const rel = stripArchiveRoot(name);
+  if (!SOURCE_FILE_RE.test(rel)) return false;
+  if (VENDORED_RE.test(rel) || METADATA_RE.test(rel)) return false;
+  if (NON_RUNTIME_RE.test(rel) || TEST_FILE_RE.test(rel)) return false;
+  if (MINIFIED_RE.test(rel)) return false;
+  if (preferSource && BUNDLED_RE.test(rel)) return false;
+  return true;
+}
+
+function scanArchiveBytes(tarBytes: Uint8Array): TarballScan {
+  const scan: TarballScan = { hits: [], descriptionTools: [] };
+  let filesScanned = 0;
+  // One cheap pass over headers first: whether authored source exists decides
+  // whether bundled output counts, and that has to be known before scanning.
+  const preferSource = hasAuthoredSourceTree([...iterateTar(tarBytes)].map((e) => e.name));
+  for (const entry of iterateTar(tarBytes)) {
+    if (filesScanned >= MAX_SCANNED_FILES) break;
+    if (!shouldScanSourceFile(entry.name, preferSource)) continue;
+    filesScanned++;
+    const rel = stripArchiveRoot(entry.name);
+    const text = new TextDecoder('utf-8', { fatal: false, ignoreBOM: false }).decode(entry.data);
+
+    for (const pattern of RISK_PATTERNS) {
+      const match = pattern.regex.exec(text);
+      if (match) {
+        scan.hits.push({
+          category: pattern.category,
+          label: pattern.label,
+          pattern: match[0],
+          file: rel,
+        });
+      }
+    }
+    // Description string literals near MCP tool contexts feed the §5 poisoning scan.
+    if (/@modelcontextprotocol|registerTool|FastMCP|mcp/i.test(text)) {
+      for (const m of text.matchAll(/description:\s*(["'`])((?:(?!\1)[\s\S]){10,500})\1/g)) {
+        if (scan.descriptionTools.length >= 100) break;
+        scan.descriptionTools.push({
+          name: `${rel} (source literal)`,
+          description: m[2],
+        });
+      }
+      // Python FastMCP / decorator style: description="..."
+      for (const m of text.matchAll(/description\s*=\s*(["'])((?:(?!\1)[\s\S]){10,500})\1/g)) {
+        if (scan.descriptionTools.length >= 100) break;
+        scan.descriptionTools.push({
+          name: `${rel} (source literal)`,
+          description: m[2],
+        });
+      }
+    }
+  }
+  // Deduplicate hits by category+label+pattern to avoid ballooning evidence.
+  const seen = new Map<string, (typeof scan.hits)[number]>();
+  for (const hit of scan.hits) {
+    const key = `${hit.category}:${hit.label}:${hit.pattern}`;
+    if (!seen.has(key)) seen.set(key, hit);
+  }
+  scan.hits = [...seen.values()];
+  return scan;
+}
+
+async function tryNpmTarballScan(ctx: CheckContext, pkg: string): Promise<TarballScan | undefined> {
   try {
     const metaRes = await fetchWithTimeout(ctx, `https://registry.npmjs.org/${encodeURIComponent(pkg)}`);
-    if (!metaRes.ok) return undefined;
+    // A 404 means the package is not published; anything else means npm failed us.
+    if (!metaRes.ok) throw new UpstreamUnavailable(metaRes.status === 404 ? undefined : `npm HTTP ${metaRes.status}`);
     const meta = (await metaRes.json()) as {
       'dist-tags'?: Record<string, string>;
       versions?: Record<string, { dist?: { tarball?: string; unpackedSize?: number } }>;
@@ -335,46 +493,45 @@ async function tryTarballScan(ctx: CheckContext, pkg: string): Promise<TarballSc
     const gunzipped = tarRes.body.pipeThrough(new DecompressionStream('gzip'));
     const tarBytes = await readCapped(gunzipped, TARBALL_MAX_BYTES);
     if (!tarBytes) return undefined;
+    return scanArchiveBytes(tarBytes);
+  } catch (err) {
+    if (err instanceof UpstreamUnavailable && err.transient) throw err;
+    return undefined;
+  }
+}
 
-    const scan: TarballScan = { hits: [], descriptionTools: [] };
-    let filesScanned = 0;
-    for (const entry of iterateTar(tarBytes)) {
-      if (filesScanned >= MAX_SCANNED_FILES) break;
-      if (!SOURCE_FILE_RE.test(entry.name) || entry.name.includes('node_modules/')) continue;
-      filesScanned++;
-      const text = new TextDecoder('utf-8', { fatal: false, ignoreBOM: false }).decode(entry.data);
+async function tryPypiSdistScan(ctx: CheckContext, pkg: string): Promise<TarballScan | undefined> {
+  try {
+    const metaRes = await fetchWithTimeout(ctx, `https://pypi.org/pypi/${encodeURIComponent(pkg)}/json`);
+    if (!metaRes.ok) throw new UpstreamUnavailable(metaRes.status === 404 ? undefined : `PyPI HTTP ${metaRes.status}`);
+    const meta = (await metaRes.json()) as {
+      urls?: Array<{
+        packagetype?: string;
+        url?: string;
+        size?: number;
+        filename?: string;
+        yanked?: boolean;
+      }>;
+    };
+    const sdist = (meta.urls ?? []).find(
+      (u) =>
+        u.packagetype === 'sdist' &&
+        !u.yanked &&
+        typeof u.url === 'string' &&
+        /\.tar\.gz$/i.test(u.filename ?? u.url),
+    );
+    if (!sdist?.url) return undefined;
+    if (sdist.size && sdist.size > TARBALL_MAX_BYTES * 4) return undefined;
 
-      for (const pattern of RISK_PATTERNS) {
-        const match = pattern.regex.exec(text);
-        if (match) {
-          scan.hits.push({
-            category: pattern.category,
-            label: pattern.label,
-            pattern: match[0],
-            file: entry.name.replace(/^package\//, ''),
-          });
-        }
-      }
-      // Description string literals near MCP tool contexts feed the §5 poisoning scan.
-      if (/@modelcontextprotocol|registerTool|mcp/i.test(text)) {
-        for (const m of text.matchAll(/description:\s*(["'`])((?:(?!\1)[\s\S]){10,500})\1/g)) {
-          if (scan.descriptionTools.length >= 100) break;
-          scan.descriptionTools.push({
-            name: `${entry.name.replace(/^package\//, '')} (source literal)`,
-            description: m[2],
-          });
-        }
-      }
-    }
-    // Deduplicate hits by category+label+pattern to avoid ballooning evidence.
-    const seen = new Map<string, typeof scan.hits[number]>();
-    for (const hit of scan.hits) {
-      const key = `${hit.category}:${hit.label}:${hit.pattern}`;
-      if (!seen.has(key)) seen.set(key, hit);
-    }
-    scan.hits = [...seen.values()];
-    return scan;
-  } catch {
+    const tarRes = await fetchWithTimeout(ctx, sdist.url);
+    if (!tarRes.ok || !tarRes.body) return undefined;
+
+    const gunzipped = tarRes.body.pipeThrough(new DecompressionStream('gzip'));
+    const tarBytes = await readCapped(gunzipped, TARBALL_MAX_BYTES);
+    if (!tarBytes) return undefined;
+    return scanArchiveBytes(tarBytes);
+  } catch (err) {
+    if (err instanceof UpstreamUnavailable && err.transient) throw err;
     return undefined;
   }
 }

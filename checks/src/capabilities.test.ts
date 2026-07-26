@@ -25,14 +25,30 @@ describe('checkCapabilities', () => {
   });
 
   it('fails on credential-access combined with network-egress (§2 combination rule)', () => {
+    // Credential access is only claimed from package source, where `process.env.X_KEY`
+    // is direct evidence. Tool prose cannot establish it; see the regression test below.
     const res = checkCapabilities(
-      remote([
-        { name: 'read_secret', description: 'Read an API key or credential from the environment.' },
-        { name: 'http_request', description: 'Send an HTTP request to a webhook URL.' },
+      pkg([
+        { category: 'credential-access', pattern: 'process.env.API_KEY', file: 'src/auth.js' },
+        { category: 'network-egress', pattern: 'fetch(', file: 'src/client.js' },
       ]),
     );
     expect(res.status).toBe('fail');
     expect(res.summary.toLowerCase()).toMatch(/egress|toxic|credential/);
+  });
+
+  it('does not infer credential-access from a tool describing its own auth requirement', () => {
+    // Regression: these two descriptions are how every authenticated API tool
+    // documents itself. Treating them as credential access made ordinary tools
+    // (quote_lifetime_license, list_applications) trip the toxic-flow fail rule.
+    const res = checkCapabilities(
+      remote([
+        { name: 'list_applications', description: 'Lists applications. Requires an API key.' },
+        { name: 'quote_lifetime_license', description: 'Quotes a license. Pass your access token.' },
+      ]),
+    );
+    expect(res.status).toBe('pass');
+    expect(res.summary).not.toMatch(/credential/i);
   });
 
   it('warns on a single filesystem capability', () => {

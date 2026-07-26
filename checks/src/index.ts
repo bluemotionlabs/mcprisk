@@ -36,7 +36,7 @@ export async function runChecks(ctx: CheckContext): Promise<ScanReport> {
     capability,
     ...transport,
     vulns,
-    checkPoisoning(surface),
+    checkPoisoning(surface, ctx.target),
   ];
 
   const { score, grade } = computeScore(checks);
@@ -55,6 +55,7 @@ export async function runChecks(ctx: CheckContext): Promise<ScanReport> {
 }
 
 export * from './types.js';
+export { assessScanQuality, type ScanQuality } from './quality.js';
 export {
   computeScore,
   CHECK_WEIGHTS,

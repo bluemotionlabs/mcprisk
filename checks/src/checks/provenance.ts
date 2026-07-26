@@ -36,7 +36,13 @@ export async function checkRegistryListed(ctx: CheckContext): Promise<CheckResul
     for (const q of queries) {
       const res = await fetchWithTimeout(ctx, `${REGISTRY_BASE}/v0/servers?search=${encodeURIComponent(q)}&limit=50`);
       if (!res.ok) {
-        return { ...base, status: 'unverifiable', summary: `Registry query failed (HTTP ${res.status}).`, evidence: [] };
+        return {
+          ...base,
+          status: 'unverifiable',
+          summary: `Registry query failed (HTTP ${res.status}).`,
+          evidence: [],
+          degraded: true,
+        };
       }
       const body = (await res.json()) as { servers?: Array<{ server?: Record<string, unknown> }> };
       // Entries are wrapped: {server: {...}, _meta: {...}}, one entry per published version.
@@ -63,7 +69,7 @@ export async function checkRegistryListed(ctx: CheckContext): Promise<CheckResul
       evidence: [],
     };
   } catch (err) {
-    return { ...base, status: 'unverifiable', summary: `Registry unreachable: ${errMsg(err)}`, evidence: [] };
+    return { ...base, status: 'unverifiable', summary: `Registry unreachable: ${errMsg(err)}`, evidence: [], degraded: true };
   }
 }
 
@@ -92,10 +98,35 @@ export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
 
     const repoRes = await fetchWithTimeout(ctx, `https://api.github.com/repos/${gh.owner}/${gh.repo}`, { headers });
     if (repoRes.status === 404) {
+      // Only a repository the server actually claimed can be "missing". When we
+      // guessed the coordinates from a directory slug, a 404 says nothing about
+      // the server, only that our guess was wrong.
+      if (ctx.target.githubInferred) {
+        return {
+          ...base,
+          status: 'warn',
+          summary: 'No public source repository could be identified for this server.',
+          evidence: [],
+        };
+      }
       return { ...base, status: 'fail', summary: 'Claimed source repository does not exist (or is private).', evidence: [] };
     }
     if (!repoRes.ok) {
-      return { ...base, status: 'unverifiable', summary: `GitHub API error (HTTP ${repoRes.status}).`, evidence: [] };
+      // 401 means our token is missing, expired or revoked, and no amount of
+      // retrying fixes it. 403/429 with the rate-limit budget exhausted is the
+      // opposite: nothing is wrong with the repo, we simply ran out of quota.
+      // Both are our problem rather than the server's, so neither may be scored
+      // as a finding, but they need different operator responses.
+      const credentialFailure = repoRes.status === 401;
+      const rateLimited =
+        (repoRes.status === 403 || repoRes.status === 429) &&
+        repoRes.headers.get('x-ratelimit-remaining') === '0';
+      const summary = credentialFailure
+        ? 'GitHub rejected the scanner credentials (HTTP 401); repository health could not be checked.'
+        : rateLimited
+          ? 'GitHub rate limit exhausted (HTTP ' + repoRes.status + '); repository health could not be checked.'
+          : `GitHub API error (HTTP ${repoRes.status}).`;
+      return { ...base, status: 'unverifiable', summary, evidence: [], degraded: true, credentialFailure };
     }
     const repo = (await repoRes.json()) as {
       archived: boolean;
@@ -129,13 +160,27 @@ export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
     if (repo.archived) {
       return { ...base, status: 'fail', summary: 'Repository is archived - unmaintained by declaration.', evidence };
     }
+    // Maintenance signals, and the only things that can lower this check. Two
+    // together is a fail, one is a warn.
+    //
+    // A published SECURITY.md is treated as a bonus, never a problem: almost no
+    // small open-source repo has one, so requiring it made this check impossible
+    // to pass (0 of 373 servers in the 2026-07-25 corpus) and therefore useless
+    // for telling maintained repositories apart from neglected ones. Its presence
+    // is reported as a positive signal; its absence costs nothing.
     const problems: string[] = [];
     if (pushedDaysAgo > STALE_PUSH_DAYS) problems.push(`no pushes in ${pushedDaysAgo} days`);
     if (!repo.license) problems.push('no license');
-    if (!hasSecurityPolicy) problems.push('no security policy');
 
     if (problems.length === 0) {
-      return { ...base, status: 'pass', summary: 'Active repository with license and security policy.', evidence };
+      return {
+        ...base,
+        status: 'pass',
+        summary: hasSecurityPolicy
+          ? 'Active repository with a license and a published security policy.'
+          : 'Active repository with a license.',
+        evidence,
+      };
     }
     return {
       ...base,
@@ -144,22 +189,30 @@ export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
       evidence,
     };
   } catch (err) {
-    return { ...base, status: 'unverifiable', summary: `GitHub unreachable: ${errMsg(err)}`, evidence: [] };
+    return { ...base, status: 'unverifiable', summary: `GitHub unreachable: ${errMsg(err)}`, evidence: [], degraded: true };
   }
 }
 
 /** Exported for testing. */
 export function matchesTarget(server: Record<string, unknown>, ctx: CheckContext): boolean {
   const name = String(server['name'] ?? '').toLowerCase();
-  const { registryName, npmPackage, github } = ctx.target;
+  const { registryName, npmPackage, pypiPackage, github } = ctx.target;
   if (registryName && name === registryName.toLowerCase()) return true;
   if (github && name.includes(`${github.owner.toLowerCase()}/${github.repo.toLowerCase()}`)) return true;
+  const packages = (server['packages'] as Array<Record<string, unknown>> | undefined) ?? [];
   if (npmPackage) {
-    const packages = (server['packages'] as Array<Record<string, unknown>> | undefined) ?? [];
-    return packages.some(
+    const hit = packages.some(
       (p) =>
         String(p['registryType'] ?? p['registry_type'] ?? '') === 'npm' &&
         String(p['identifier'] ?? p['name'] ?? '').toLowerCase() === npmPackage.toLowerCase(),
+    );
+    if (hit) return true;
+  }
+  if (pypiPackage) {
+    return packages.some(
+      (p) =>
+        String(p['registryType'] ?? p['registry_type'] ?? '').toLowerCase() === 'pypi' &&
+        String(p['identifier'] ?? p['name'] ?? '').toLowerCase() === pypiPackage.toLowerCase(),
     );
   }
   return false;

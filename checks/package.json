@@ -14,10 +14,11 @@
   "scripts": {
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.dev.json",
     "scan": "tsx src/scan.ts"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4",
     "typescript": "^5",
