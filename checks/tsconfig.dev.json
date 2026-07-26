@@ -1,0 +1,13 @@
+// Typecheck for everything the library config deliberately leaves out: the
+// test suite, its helpers, and the scan.ts CLI. These run under Node, so they
+// get Node's globals. Keeping them in a separate project is what allows
+// tsconfig.json to prove the library itself is Worker-clean.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["src"],
+  "exclude": []
+}
