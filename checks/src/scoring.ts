@@ -66,8 +66,14 @@ export function computeCapabilityRisk(checks: CheckResult[]): CapabilityRisk {
   if (!capability || capability.status === 'unverifiable') return 'unknown';
 
   const recorded = capability.evidence.find((e) => e.label === CAPABILITY_EVIDENCE_LABEL);
+  // Scans predating the capability axis carry no such entry. Treating that as
+  // "nothing detected" would confidently relabel a shell-execution server as
+  // Low, so an absent entry means we genuinely cannot tell and the server needs
+  // rescanning, not regrading. A clean modern scan records the string 'none'.
+  if (!recorded) return 'unknown';
+
   const categories = new Set(
-    (recorded?.value ?? '')
+    (recorded.value ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s.length > 0 && s !== 'none'),
