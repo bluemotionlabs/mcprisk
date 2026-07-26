@@ -14,19 +14,22 @@ import { checkVulnerabilities } from './checks/vulnerabilities.js';
 import { checkTransport } from './checks/transport.js';
 import { checkCapabilities, computeToolSchemaHash, getToolSurface } from './checks/capabilities.js';
 import { checkPoisoning } from './checks/poisoning.js';
-import { computeScore } from './scoring.js';
+import { computeCapabilityRisk, computeScore } from './scoring.js';
 
 export async function runChecks(ctx: CheckContext): Promise<ScanReport> {
   // Tool surface first so §3.2 can gate anonymous-auth severity on capability status.
   const surface = await getToolSurface(ctx);
   const capability = checkCapabilities(surface);
+  // §3.2 gates anonymous-access severity on what the server can DO, so the
+  // risk axis has to be resolved before the transport probe runs.
+  const capabilityRisk = computeCapabilityRisk([capability]);
 
   const [registryListed, repoHealth, packageHygiene, vulns, transport] = await Promise.all([
     checkRegistryListed(ctx),
     checkRepoHealth(ctx),
     checkPackageHygiene(ctx),
     checkVulnerabilities(ctx),
-    checkTransport(ctx, capability.status),
+    checkTransport(ctx, capabilityRisk),
   ]);
 
   const checks: CheckResult[] = [
@@ -50,6 +53,7 @@ export async function runChecks(ctx: CheckContext): Promise<ScanReport> {
     toolSchemaHash: hasRealTools ? await computeToolSchemaHash(surface.tools) : undefined,
     tools: hasRealTools ? surface.tools : undefined,
     toolSource: surface.source,
+    capabilityRisk,
     createdAt: new Date().toISOString(),
   };
 }
@@ -58,6 +62,9 @@ export * from './types.js';
 export { assessScanQuality, type ScanQuality } from './quality.js';
 export {
   computeScore,
+  computeCapabilityRisk,
+  capabilityRiskAtLeast,
+  CAPABILITY_EVIDENCE_LABEL,
   CHECK_WEIGHTS,
   GRADE_BANDS,
   UNVERIFIABLE_CAPABILITY_CAP,

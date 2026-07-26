@@ -53,7 +53,7 @@ describe('runChecks', () => {
     expect(report.checks.some((c) => c.id === 'provenance.package-hygiene')).toBe(true);
   });
 
-  it('detects dangerous capabilities and propagates to auth gating', async () => {
+  it('rates dangerous capabilities as risk and propagates that to auth gating', async () => {
     let callCount = 0;
     const fetchImpl = mockFetch([
       {
@@ -87,8 +87,11 @@ describe('runChecks', () => {
     const ctx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
     const report = await runChecks(ctx);
 
+    // The shell tool no longer fails §2; it sets the capability axis to Critical,
+    // and §3.2 still fails because an anonymous server at Medium+ risk is a fail.
     const capability = report.checks.find((c) => c.id === 'capabilities.tool-surface');
-    expect(capability?.status).toBe('fail');
+    expect(capability?.status).toBe('pass');
+    expect(report.capabilityRisk).toBe('critical');
 
     const authRequired = report.checks.find((c) => c.id === 'transport.auth-required');
     expect(authRequired?.status).toBe('fail');

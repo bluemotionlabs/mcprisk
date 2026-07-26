@@ -76,11 +76,11 @@ describe('computeScore', () => {
   });
 
   it('scores warn as half weight', () => {
-    // Only poisoning scored: warn → 0.5 * 15 / 15 = 50 → D
+    // Only poisoning scored: warn → 0.5 * 20 / 20 = 50 → D
     const { score, grade } = computeScore([result('poisoning.patterns', 'warn')]);
     expect(score).toBe(50);
     expect(grade).toBe('D');
-    expect(CHECK_WEIGHTS['poisoning.patterns']).toBe(15);
+    expect(CHECK_WEIGHTS['poisoning.patterns']).toBe(20);
   });
 
   it('poisoning fail overrides the unverifiable-capability B cap to F', () => {

@@ -7,12 +7,13 @@
  * metadata published (§3.3). Local stdio servers get 'info' - they run with
  * host privileges by design, which is §1/§2's problem, not §3's.
  *
- * §3.2 severity is gated on the §2 capability result (Policy): anonymous access
- * to a Low/clean surface is warn; anonymous access when capabilities are
- * Medium+ (warn/fail) or unverifiable is fail.
+ * §3.2 severity is gated on the server's Capability Risk (Policy §2 matrix):
+ * anonymous access to a Low-rated surface is warn; anonymous access at Medium
+ * or higher, or where capabilities could not be inspected, is fail.
  */
 
 import type { CheckContext, CheckResult, CheckStatus } from '../types.js';
+import type { CapabilityRisk } from '../scoring.js';
 import { errMsg, fetchWithTimeout } from '../utils.js';
 
 /** Auth probe outcome before capability gating is applied. */
@@ -23,19 +24,24 @@ export type AuthProbeOutcome =
   | 'unverifiable';
 
 /**
- * Resolve §3.2 status from the auth probe and the capability check status.
+ * Resolve §3.2 status from the auth probe and the server's capability risk.
+ *
+ * Gating on risk rather than on the §2 check status is what §3.2 actually
+ * says: anonymous access to a Low-rated surface is a warn, anonymous access at
+ * Medium or higher is failed outright, and an unauthenticated server whose
+ * capabilities cannot be inspected takes the stricter branch, since the
+ * public-read-only exception is a claim the server has to be able to show.
+ *
  * Pure helper so tests do not need network.
  */
 export function resolveAuthRequiredStatus(
   authOutcome: AuthProbeOutcome,
-  capabilityStatus: CheckStatus = 'pass',
+  capabilityRisk: CapabilityRisk = 'low',
 ): CheckStatus {
   if (authOutcome === 'required-with-www-auth') return 'pass';
   if (authOutcome === 'required-no-www-auth') return 'warn';
   if (authOutcome === 'unverifiable') return 'unverifiable';
-  // anonymous: warn only when the tool surface looks Low/clean (capability pass)
-  if (capabilityStatus === 'pass') return 'warn';
-  return 'fail';
+  return capabilityRisk === 'low' ? 'warn' : 'fail';
 }
 
 function authSummary(outcome: AuthProbeOutcome, status: CheckStatus, httpStatus?: number): string {
@@ -63,7 +69,7 @@ function authSummary(outcome: AuthProbeOutcome, status: CheckStatus, httpStatus?
 
 export async function checkTransport(
   ctx: CheckContext,
-  capabilityStatus: CheckStatus = 'pass',
+  capabilityRisk: CapabilityRisk = 'low',
 ): Promise<CheckResult[]> {
   const url = ctx.target.remoteUrl;
   if (!url) {
@@ -125,7 +131,7 @@ export async function checkTransport(
       degraded = res.status >= 500;
     }
 
-    const status = resolveAuthRequiredStatus(outcome, capabilityStatus);
+    const status = resolveAuthRequiredStatus(outcome, capabilityRisk);
     results.push({
       id: 'transport.auth-required',
       policyRef: '§3.2',
