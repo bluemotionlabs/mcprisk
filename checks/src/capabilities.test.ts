@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { checkCapabilities, computeToolSchemaHash } from './checks/capabilities.js';
+import { computeCapabilityRisk } from './scoring.js';
 import type { RiskHit, ToolSurface } from './types.js';
+
+/** Capability risk for a surface, the way runChecks derives it. */
+const riskOf = (surface: ToolSurface) => computeCapabilityRisk([checkCapabilities(surface)]);
 
 function remote(tools: Array<{ name: string; description?: string }>): ToolSurface {
   return { source: 'remote-tools-list', tools, sourceRiskHits: [] };
@@ -17,14 +21,15 @@ describe('checkCapabilities', () => {
     expect(res.status).toBe('pass');
   });
 
-  it('fails on process-execution alone', () => {
-    const res = checkCapabilities(
-      remote([{ name: 'run_shell', description: 'Execute a shell command on the host.' }]),
-    );
-    expect(res.status).toBe('fail');
+  it('rates process-execution Critical without failing the check', () => {
+    // §2.4: a shell server is supposed to run shells. That is capability risk to
+    // disclose, not a defect to grade down.
+    const surface = remote([{ name: 'run_shell', description: 'Execute a shell command on the host.' }]);
+    expect(checkCapabilities(surface).status).toBe('pass');
+    expect(riskOf(surface)).toBe('critical');
   });
 
-  it('fails on credential-access combined with network-egress (§2 combination rule)', () => {
+  it('rates credential-access plus network-egress Critical (§2 combination rule)', () => {
     // Credential access is only claimed from package source, where `process.env.X_KEY`
     // is direct evidence. Tool prose cannot establish it; see the regression test below.
     const res = checkCapabilities(
@@ -33,8 +38,8 @@ describe('checkCapabilities', () => {
         { category: 'network-egress', pattern: 'fetch(', file: 'src/client.js' },
       ]),
     );
-    expect(res.status).toBe('fail');
-    expect(res.summary.toLowerCase()).toMatch(/egress|toxic|credential/);
+    expect(res.status).toBe('pass');
+    expect(computeCapabilityRisk([res])).toBe('critical');
   });
 
   it('does not infer credential-access from a tool describing its own auth requirement', () => {
@@ -51,29 +56,39 @@ describe('checkCapabilities', () => {
     expect(res.summary).not.toMatch(/credential/i);
   });
 
-  it('warns on a single filesystem capability', () => {
-    const res = checkCapabilities(
-      remote([{ name: 'write_file', description: 'Write or overwrite a file on disk.' }]),
-    );
-    expect(res.status).toBe('warn');
+  it('rates a filesystem capability High', () => {
+    const surface = remote([{ name: 'write_file', description: 'Write or overwrite a file on disk.' }]);
+    expect(checkCapabilities(surface).status).toBe('pass');
+    expect(riskOf(surface)).toBe('high');
   });
 
-  it('warns on a single network-egress capability', () => {
-    const res = checkCapabilities(
-      remote([{ name: 'fetch_url', description: 'Fetch a URL via HTTP request.' }]),
-    );
-    expect(res.status).toBe('warn');
+  it('rates a network-egress capability High', () => {
+    const surface = remote([{ name: 'fetch_url', description: 'Fetch a URL via HTTP request.' }]);
+    expect(riskOf(surface)).toBe('high');
   });
 
-  it('fails when three risk categories are present', () => {
+  it('rates credential access alone Medium', () => {
+    expect(riskOf(pkg([{ category: 'credential-access', pattern: 'process.env.TOKEN', file: 'c.ts' }]))).toBe('medium');
+  });
+
+  it('rates a clean surface Low and an uninspectable one Unknown', () => {
+    expect(riskOf(remote([{ name: 'list_docs', description: 'Lists public documentation.' }]))).toBe('low');
+    expect(riskOf({ source: 'none', tools: [], sourceRiskHits: [] })).toBe('unknown');
+  });
+
+  it('records detected capabilities as evidence so risk survives persistence', () => {
+    // computeCapabilityRisk reads this back from a stored scan, which is what
+    // makes regrading possible without rescanning every server.
     const res = checkCapabilities(
       pkg([
         { category: 'filesystem', pattern: 'writeFileSync', file: 'a.ts' },
         { category: 'network-egress', pattern: 'fetch(', file: 'b.ts' },
-        { category: 'credential-access', pattern: 'process.env.TOKEN', file: 'c.ts' },
       ]),
     );
-    expect(res.status).toBe('fail');
+    const recorded = res.evidence.find((e) => e.label === 'Detected capabilities');
+    expect(recorded?.value).toContain('filesystem');
+    expect(recorded?.value).toContain('network-egress');
+    expect(computeCapabilityRisk([JSON.parse(JSON.stringify(res))])).toBe('high');
   });
 
   it('is unverifiable when the tool surface cannot be inspected', () => {
@@ -85,7 +100,8 @@ describe('checkCapabilities', () => {
     const res = checkCapabilities(
       pkg([{ category: 'process-execution', pattern: 'child_process', label: 'child process execution', file: 'index.js' }]),
     );
-    expect(res.status).toBe('fail');
+    expect(res.status).toBe('pass');
+    expect(computeCapabilityRisk([res])).toBe('critical');
     expect(res.evidence.some((e) => e.label.includes('process-execution'))).toBe(true);
   });
 });

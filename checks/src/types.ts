@@ -124,6 +124,9 @@ export interface CheckContext {
 
 export type Grade = 'A' | 'B' | 'C' | 'D' | 'F';
 
+import type { CapabilityRisk } from './scoring.js';
+export type { CapabilityRisk };
+
 export interface ScanReport {
   target: ScanTarget;
   checks: CheckResult[];
@@ -133,5 +136,10 @@ export interface ScanReport {
   toolSchemaHash?: string;
   tools?: ToolInfo[];
   toolSource: ToolSource;
+  /**
+   * What the tools can do, reported alongside the trust grade rather than
+   * folded into it. 'unknown' when the tool surface could not be inspected.
+   */
+  capabilityRisk: CapabilityRisk;
   createdAt: string;
 }

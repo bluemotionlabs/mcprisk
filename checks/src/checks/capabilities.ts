@@ -22,6 +22,7 @@ import type {
   ToolSurface,
 } from '../types.js';
 import { errMsg, fetchWithTimeout } from '../utils.js';
+import { CAPABILITY_EVIDENCE_LABEL } from '../scoring.js';
 
 const TARBALL_MAX_BYTES = 10 * 1024 * 1024;
 const MAX_SCANNED_FILES = 400;
@@ -167,35 +168,27 @@ export function checkCapabilities(surface: ToolSurface): CheckResult {
     }
   }
 
-  const dangerous = categories.has('process-execution');
-  // Policy §2 automation note: credential-access is the detectable proxy for
-  // "read private data"; paired with egress it fails §2 / feeds §6.1.
-  const toxicReadEgress =
-    categories.has('credential-access') && categories.has('network-egress');
-  const combo = categories.size;
+  // What was detected is recorded, not scored. §2.4: capability risk is
+  // independent of how well-built a server is, and a server whose purpose IS
+  // filesystem or shell access should not be graded down for doing its job.
+  // The separate Capability Risk axis carries this; computeCapabilityRisk()
+  // reads it back from exactly this evidence entry.
+  const detected = [...categories];
+  evidence.push({
+    label: CAPABILITY_EVIDENCE_LABEL,
+    value: detected.length > 0 ? detected.join(', ') : 'none',
+  });
 
-  if (combo === 0) {
-    return {
-      ...base,
-      status: 'pass',
-      summary:
-        surface.source === 'remote-tools-list'
-          ? `${surface.tools.length} tool(s) enumerated; no high-risk capability signals.`
-          : 'Package source scanned; no high-risk capability signals.',
-      evidence,
-    };
-  }
+  const inspectedNote =
+    surface.source === 'remote-tools-list'
+      ? `${surface.tools.length} tool(s) enumerated`
+      : 'Package source scanned';
+  const summary =
+    detected.length > 0
+      ? `${inspectedNote}. Capabilities detected: ${detected.join(', ')}. Reported as capability risk (§2.4); whether each is essential to the server's stated purpose is §2.3 and remains a manual judgement.`
+      : `${inspectedNote}; no high-risk capability signals.`;
 
-  const status = dangerous || toxicReadEgress || combo >= 3 ? 'fail' : 'warn';
-  const comboNote = toxicReadEgress
-    ? ' Credential-access combined with network egress is a toxic flow (§2 combination rule / §6.1).'
-    : '';
-  return {
-    ...base,
-    status,
-    summary: `High-risk capabilities detected: ${[...categories].join(', ')}. Verify each is essential to the server's stated purpose (§2.3).${comboNote}`,
-    evidence,
-  };
+  return { ...base, status: 'pass', summary, evidence };
 }
 
 /* ---------------- remote: minimal MCP streamable-HTTP client ---------------- */

@@ -17,17 +17,76 @@
 
 import type { CheckResult, Grade } from './types.js';
 
+/**
+ * Trust weights. `capabilities.tool-surface` scores INSPECTABILITY only (can an
+ * outsider see what this server does), not capability breadth. What the tools
+ * can actually do is the separate Capability Risk axis below, and carries no
+ * grade penalty: a filesystem server is supposed to touch the filesystem, and
+ * scoring that as a defect made the most useful class of server unable to grade
+ * well no matter how honestly it was built (Policy §2.4).
+ */
 export const CHECK_WEIGHTS: Record<string, number> = {
   'provenance.registry-listed': 5,
-  'provenance.repo-health': 10,
-  'provenance.package-hygiene': 10,
-  'capabilities.tool-surface': 30,
+  'provenance.repo-health': 12,
+  'provenance.package-hygiene': 12,
+  'capabilities.tool-surface': 15,
   'transport.https': 5,
-  'transport.auth-required': 10,
+  'transport.auth-required': 14,
   'transport.oauth-metadata': 5,
-  'vulns.osv': 10,
-  'poisoning.patterns': 15,
+  'vulns.osv': 12,
+  'poisoning.patterns': 20,
 };
+
+/**
+ * What a server's tools can DO, independent of who wrote it. Reported alongside
+ * the trust grade rather than folded into it. Levels follow the Capability Risk
+ * Matrix in Policy §2.
+ */
+export type CapabilityRisk = 'low' | 'medium' | 'high' | 'critical' | 'unknown';
+
+/**
+ * The evidence label under which the capability check records what it detected.
+ * Recording it as evidence (rather than passing it out of band) keeps a stored
+ * scan self-describing, so the risk axis can be recomputed from a persisted
+ * report without rescanning the server.
+ */
+export const CAPABILITY_EVIDENCE_LABEL = 'Detected capabilities';
+
+const CAPABILITY_RISK_RANK: Record<CapabilityRisk, number> = {
+  unknown: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+export function computeCapabilityRisk(checks: CheckResult[]): CapabilityRisk {
+  const capability = checks.find((c) => c.id === 'capabilities.tool-surface');
+  // Nothing inspected means nothing can be claimed about capability either way.
+  if (!capability || capability.status === 'unverifiable') return 'unknown';
+
+  const recorded = capability.evidence.find((e) => e.label === CAPABILITY_EVIDENCE_LABEL);
+  const categories = new Set(
+    (recorded?.value ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && s !== 'none'),
+  );
+
+  if (categories.size === 0) return 'low';
+  // Process execution subsumes every other capability (§2 matrix).
+  if (categories.has('process-execution')) return 'critical';
+  // Combination rule: reading credential material plus egress is an
+  // exfiltration pipeline even when each half is individually acceptable.
+  if (categories.has('credential-access') && categories.has('network-egress')) return 'critical';
+  if (categories.has('filesystem') || categories.has('network-egress')) return 'high';
+  if (categories.has('credential-access')) return 'medium';
+  return 'low';
+}
+
+export function capabilityRiskAtLeast(risk: CapabilityRisk, floor: CapabilityRisk): boolean {
+  return CAPABILITY_RISK_RANK[risk] >= CAPABILITY_RISK_RANK[floor];
+}
 
 export const GRADE_BANDS: Array<{ min: number; grade: Grade }> = [
   { min: 90, grade: 'A' },

@@ -4,26 +4,27 @@ import { jsonResponse, makeCtx, mockFetch, textResponse } from './test-helpers.j
 
 describe('resolveAuthRequiredStatus', () => {
   it('passes when auth is required with WWW-Authenticate', () => {
-    expect(resolveAuthRequiredStatus('required-with-www-auth', 'pass')).toBe('pass');
-    expect(resolveAuthRequiredStatus('required-with-www-auth', 'fail')).toBe('pass');
+    expect(resolveAuthRequiredStatus('required-with-www-auth', 'low')).toBe('pass');
+    expect(resolveAuthRequiredStatus('required-with-www-auth', 'critical')).toBe('pass');
   });
 
   it('warns when auth is required without WWW-Authenticate', () => {
-    expect(resolveAuthRequiredStatus('required-no-www-auth', 'pass')).toBe('warn');
+    expect(resolveAuthRequiredStatus('required-no-www-auth', 'low')).toBe('warn');
   });
 
-  it('warns on anonymous access when capabilities pass (Low/public)', () => {
-    expect(resolveAuthRequiredStatus('anonymous', 'pass')).toBe('warn');
+  it('warns on anonymous access to a Low-risk surface', () => {
+    expect(resolveAuthRequiredStatus('anonymous', 'low')).toBe('warn');
   });
 
-  it('fails on anonymous access when capabilities are warn, fail, or unverifiable', () => {
-    expect(resolveAuthRequiredStatus('anonymous', 'warn')).toBe('fail');
-    expect(resolveAuthRequiredStatus('anonymous', 'fail')).toBe('fail');
-    expect(resolveAuthRequiredStatus('anonymous', 'unverifiable')).toBe('fail');
+  it('fails on anonymous access at Medium risk or above, or when uninspectable', () => {
+    expect(resolveAuthRequiredStatus('anonymous', 'medium')).toBe('fail');
+    expect(resolveAuthRequiredStatus('anonymous', 'high')).toBe('fail');
+    expect(resolveAuthRequiredStatus('anonymous', 'critical')).toBe('fail');
+    expect(resolveAuthRequiredStatus('anonymous', 'unknown')).toBe('fail');
   });
 
   it('returns unverifiable for unreachable probes', () => {
-    expect(resolveAuthRequiredStatus('unverifiable', 'pass')).toBe('unverifiable');
+    expect(resolveAuthRequiredStatus('unverifiable', 'low')).toBe('unverifiable');
   });
 });
 
@@ -47,21 +48,21 @@ describe('checkTransport', () => {
     ]);
 
     const httpsCtx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
-    const httpsResults = await checkTransport(httpsCtx, 'pass');
+    const httpsResults = await checkTransport(httpsCtx, 'low');
     expect(httpsResults.find((r) => r.id === 'transport.https')?.status).toBe('pass');
 
     const httpCtx = makeCtx({ remoteUrl: 'http://example.com/mcp' }, fetchImpl);
-    const httpResults = await checkTransport(httpCtx, 'pass');
+    const httpResults = await checkTransport(httpCtx, 'low');
     expect(httpResults.find((r) => r.id === 'transport.https')?.status).toBe('fail');
   });
 
-  it('warns on anonymous access when capability status is pass', async () => {
+  it('warns on anonymous access to a Low-risk surface (integration)', async () => {
     const fetchImpl = mockFetch([
       { match: '/mcp', response: jsonResponse(200, { ok: true }) },
       { match: 'oauth-protected-resource', response: textResponse(404) },
     ]);
     const ctx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
-    const results = await checkTransport(ctx, 'pass');
+    const results = await checkTransport(ctx, 'low');
     expect(results.find((r) => r.id === 'transport.auth-required')?.status).toBe('warn');
   });
 
@@ -71,7 +72,7 @@ describe('checkTransport', () => {
       { match: 'oauth-protected-resource', response: textResponse(404) },
     ]);
     const ctx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
-    const results = await checkTransport(ctx, 'fail');
+    const results = await checkTransport(ctx, 'critical');
     expect(results.find((r) => r.id === 'transport.auth-required')?.status).toBe('fail');
   });
 
@@ -81,7 +82,7 @@ describe('checkTransport', () => {
       { match: 'oauth-protected-resource', response: textResponse(404) },
     ]);
     const ctx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
-    const results = await checkTransport(ctx, 'fail');
+    const results = await checkTransport(ctx, 'critical');
     expect(results.find((r) => r.id === 'transport.auth-required')?.status).toBe('pass');
   });
 
@@ -134,7 +135,7 @@ describe('checkTransport', () => {
       { match: 'oauth-protected-resource', response: textResponse(404) },
     ]);
     const ctx = makeCtx({ remoteUrl: 'https://example.com/mcp' }, fetchImpl);
-    const results = await checkTransport(ctx, 'unverifiable');
+    const results = await checkTransport(ctx, 'unknown');
     expect(results.find((r) => r.id === 'transport.auth-required')?.status).toBe('fail');
   });
 });
@@ -155,7 +156,7 @@ describe('checkTransport auth probe classification', () => {
       { match: 'https://srv.test/mcp', response: textResponse(status, '', headers) },
     ]);
     const ctx = makeCtx({ remoteUrl: 'https://srv.test/mcp' }, fetchImpl);
-    return authCheck(await checkTransport(ctx, 'fail'));
+    return authCheck(await checkTransport(ctx, 'critical'));
   };
 
   it('treats a Cloudflare origin error as unverifiable and retryable', async () => {
