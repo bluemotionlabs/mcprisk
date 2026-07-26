@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeScore, CHECK_WEIGHTS, toGrade, GRADE_BANDS } from './scoring.js';
+import { computeCapabilityRisk, computeScore, CHECK_WEIGHTS, toGrade, GRADE_BANDS } from './scoring.js';
 import { allPassChecks, result } from './test-helpers.js';
 
 describe('toGrade', () => {
@@ -121,5 +121,26 @@ describe('CHECK_WEIGHTS consistency', () => {
   it('weights sum to 100', () => {
     const total = Object.values(CHECK_WEIGHTS).reduce((a, b) => a + b, 0);
     expect(total).toBe(100);
+  });
+});
+
+describe('computeCapabilityRisk backward compatibility', () => {
+  const capCheck = (status: string, evidence: Array<{ label: string; value?: string }>) => ({
+    id: 'capabilities.tool-surface', policyRef: '§2', title: 'cap',
+    status: status as never, summary: '', evidence,
+  });
+
+  it('reports unknown for a scan predating the capability axis', () => {
+    // Old scans recorded per-tool evidence but no "Detected capabilities" entry.
+    // Reading that as "nothing detected" would relabel a shell server as Low.
+    expect(computeCapabilityRisk([capCheck('pass', [{ label: 'run_shell', value: 'process-execution' }])])).toBe('unknown');
+  });
+
+  it('reports low only when a modern scan explicitly recorded none', () => {
+    expect(computeCapabilityRisk([capCheck('pass', [{ label: 'Detected capabilities', value: 'none' }])])).toBe('low');
+  });
+
+  it('reads categories back from the recorded entry', () => {
+    expect(computeCapabilityRisk([capCheck('pass', [{ label: 'Detected capabilities', value: 'process-execution' }])])).toBe('critical');
   });
 });
