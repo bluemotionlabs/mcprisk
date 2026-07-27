@@ -2,7 +2,7 @@
 
 This package is the executable half of the **MCP Server Security Policy**: every check here verifies a numbered section of the policy, and every score the scanner publishes is computed by the code in this repository - weights, grade bands, and pattern lists included. Nothing that decides a score is private. *Public scoring supports auditable results.*
 
-> **Policy:** [POLICY.md](../POLICY.md) · **Scanner:** [mcpscorecard.dev](https://mcpscorecard.dev)
+> **Policy:** [POLICY.md](../POLICY.md) · **Scanner:** [mcprisk.org](https://mcprisk.org)
 
 ## Check → Policy mapping
 

@@ -92,7 +92,7 @@ export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
   try {
     const headers: Record<string, string> = {
       accept: 'application/vnd.github+json',
-      'user-agent': 'mcpscorecard-scanner',
+      'user-agent': 'mcprisk-scanner',
     };
     if (ctx.githubToken) headers.authorization = `Bearer ${ctx.githubToken}`;
 

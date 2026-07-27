@@ -11,7 +11,7 @@ Excellent general guidance on MCP security already exists - the [official specif
 This policy fills that gap. It is:
 
 - **Scored on two axes.** Sections roll up into a 0–100 trust score and A–F grade, reported alongside a separate capability-risk rating. Together they answer "can I trust who built this?" and "how much damage could it do?" without pretending those are the same question.
-- **Tool-verifiable.** Every requirement marked *Verified by* is checked automatically by the companion open-source scoring model ([`@mcprisk/checks`](https://github.com/bluemotionlabs/mcpscorecard)), which implements this policy check-for-check. Requirements marked *Manual* are not automated and define what a human reviewer must confirm.
+- **Tool-verifiable.** Every requirement marked *Verified by* is checked automatically by the companion open-source scoring model ([`@mcprisk/checks`](https://github.com/bluemotionlabs/mcprisk)), which implements this policy check-for-check. Requirements marked *Manual* are not automated and define what a human reviewer must confirm.
 - **Cited, not invented.** Each section cites the authorities it draws on and turns their guidance into concrete checks. Where standards are still emerging ([NIST's COSAiS](https://csrc.nist.gov/Projects/cosais/use-cases) control overlays for AI agent systems, targeted 2026–27), this policy aims to align with them as they evolve.
 
 **Threat context.** This is not theoretical. Between January and February 2026, researchers filed 30+ CVEs against MCP servers, clients, and infrastructure - the most severe ([CVE-2025-6514](https://github.com/advisories/GHSA-6xpm-ggf7-wc3p), CVSS 9.6) affecting 437,000+ downloads. Documented in-the-wild attacks include [a malicious MCP server that impersonated a legitimate email tool to exfiltrate customer data](https://thehackernews.com/2025/09/first-malicious-mcp-server-found.html).
@@ -186,8 +186,8 @@ Every authority cited above, in one place. Section references (1-6) are inline t
 
 ## Using this policy
 
-- **Self-serve verification:** run any server through the companion scorecard tool at [mcpscorecard.dev](https://mcpscorecard.dev) - it executes every *Verified by* check above and links each finding back to its section here.
-- **The open scoring model:** the exact logic, weights, and thresholds are public at [github.com/bluemotionlabs/mcpscorecard](https://github.com/bluemotionlabs/mcpscorecard).
+- **Self-serve verification:** run any server through the companion scanner at [mcprisk.org](https://mcprisk.org) - it executes every *Verified by* check above and links each finding back to its section here.
+- **The open scoring model:** the exact logic, weights, and thresholds are public at [github.com/bluemotionlabs/mcprisk](https://github.com/bluemotionlabs/mcprisk).
 - <!-- TODO (author pass): consulting CTA - deeper review, custom policy adoption, remediation. -->
 
 **License.** This document (text) is licensed under [Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)](https://creativecommons.org/licenses/by-sa/4.0/). Reuse, adaptation, and commercial use are welcome; a modified version you redistribute must credit this original and carry the same license. The companion scoring model (code, in the `checks/` repository) is licensed separately, under Apache-2.0.

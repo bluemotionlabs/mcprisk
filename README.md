@@ -1,4 +1,4 @@
-# MCP Scorecard
+# MCP Risk
 
 **An open security standard for [Model Context Protocol](https://modelcontextprotocol.io) servers - and the open scoring model that verifies it.**
 
@@ -7,11 +7,11 @@ When you connect an MCP server to an agent, you grant code you didn't write the 
 - **[POLICY.md](POLICY.md)** - the *MCP Server Security Policy*: a scored, human-readable acceptance standard. Six categories, each with a stated intent, the checks that verify it, and references to the authorities it operationalizes (the official MCP spec, OWASP MCP Top 10, NSA and CSA guidance, Anthropic's Zero Trust framework, and NIST's emerging AI-agent overlays).
 - **[checks/](checks/)** - the *open scoring model*: the exact code, weights, grade bands, and pattern lists that compute a server's score. Nothing that decides a grade is hidden. *Public scoring supports auditable results.*
 
-The hosted scanner that runs this scoring model for you lives at **[mcpscorecard.dev](https://mcpscorecard.dev)** - paste an npm package, GitHub repo, registry name, or server URL and get a grade with every finding linked back to its policy section.
+The hosted scanner that runs this scoring model for you lives at **[mcprisk.org](https://mcprisk.org)** - paste an npm package, GitHub repo, registry name, or server URL and get a grade with every finding linked back to its policy section.
 
 ## Why open
 
-Several MCP scanners exist; none publish how they score. This one does, on purpose. The policy is the "what and why"; the scoring model is the "how we verify it" - the same pairing [OpenSSF](https://openssf.org) uses between its framework and its Scorecard checks. If you think a weight is wrong or a check is too blunt, [open an issue](https://github.com/bluemotionlabs/mcpscorecard/issues). That is the point.
+Several MCP scanners exist; none publish how they score. This one does, on purpose. The policy is the "what and why"; the scoring model is the "how we verify it" - the same pairing [OpenSSF](https://openssf.org) uses between its framework and its Scorecard checks. If you think a weight is wrong or a check is too blunt, [open an issue](https://github.com/bluemotionlabs/mcprisk/issues). That is the point.
 
 ## What it checks
 
