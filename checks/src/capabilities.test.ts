@@ -136,3 +136,41 @@ describe('computeToolSchemaHash', () => {
     expect(await computeToolSchemaHash(a)).toBe(await computeToolSchemaHash(b));
   });
 });
+
+describe('capability inference from tool prose', () => {
+  const remoteSurface = (tools: Array<{ name: string; description?: string }>): ToolSurface => ({
+    source: 'remote-tools-list', tools, sourceRiskHits: [],
+  });
+
+  it('does not read shell execution into ordinary lookup tools', () => {
+    // Real Critical ratings from the 2026-07-26 scan. Each of these is a
+    // read-only lookup that matched a word like "command" in its description.
+    const res = checkCapabilities(remoteSurface([
+      { name: 'get_scan_status', description: 'Returns the status of a scan command you previously started.' },
+      { name: 'search_docs', description: 'Search documentation. Use the command name as the query.' },
+      { name: 'query_registry', description: 'Query the registry for a package.' },
+    ]));
+    expect(computeCapabilityRisk([res])).toBe('low');
+  });
+
+  it('still reads shell execution from a tool that names itself that way', () => {
+    expect(computeCapabilityRisk([checkCapabilities(remoteSurface([
+      { name: 'run_shell', description: 'Run something.' },
+    ]))])).toBe('critical');
+  });
+
+  it('still reads egress and filesystem intent from tool names', () => {
+    expect(computeCapabilityRisk([checkCapabilities(remoteSurface([
+      { name: 'test_webhook_delivery', description: 'Send a webhook to verify delivery.' },
+    ]))])).toBe('high');
+    expect(computeCapabilityRisk([checkCapabilities(remoteSurface([
+      { name: 'delete_file', description: 'Delete a file from the workspace.' },
+    ]))])).toBe('high');
+  });
+
+  it('still rates real shell execution Critical when read from package source', () => {
+    expect(computeCapabilityRisk([checkCapabilities(pkg([
+      { category: 'process-execution', pattern: 'child_process', file: 'src/run.js' },
+    ]))])).toBe('critical');
+  });
+});

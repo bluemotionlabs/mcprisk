@@ -42,17 +42,27 @@ export const RISK_PATTERNS: Array<{ category: RiskCategory; label: string; regex
 ];
 
 /**
- * Same categories applied to tool names/descriptions when we have real tool metadata.
+ * Categories inferred from tool names and descriptions, used when a live
+ * tools/list is all we have.
  *
- * credential-access is deliberately absent. A tool description mentioning "api key"
- * or "token" is almost always documenting its own auth requirement, which every
- * authenticated API tool does, so the pattern fired on ordinary tools
- * (quote_lifetime_license, list_applications) and then propagated into the
- * toxicReadEgress fail rule below. Credential access is only claimed from package
- * source, where `process.env.X_TOKEN` is direct evidence rather than prose.
+ * Two categories are constrained here, because prose cannot establish what code
+ * does and both were producing Critical ratings for servers that do neither.
+ *
+ * - credential-access is absent entirely. A description mentioning "api key" or
+ *   "token" is almost always documenting the tool's own auth requirement, which
+ *   every authenticated tool does.
+ * - process-execution matches the tool NAME only, not its description. A tool
+ *   called `run_shell` is declaring what it does; "the command you previously
+ *   started" in a description is ordinary English. Matching descriptions
+ *   labelled get_scan_status, search_docs and query_registry as shell
+ *   execution, and since process-execution alone escalates to Critical, that
+ *   put the loudest badge available on read-only lookup tools.
+ *
+ * Both are still read from package source, where `child_process` or
+ * `process.env.X_TOKEN` is direct evidence rather than prose.
  */
-const TOOL_TEXT_RISKS: Array<{ category: RiskCategory; regex: RegExp }> = [
-  { category: 'process-execution', regex: /\b(shell|exec|command|terminal|bash|run[_ ]?(command|script))\b/i },
+const TOOL_TEXT_RISKS: Array<{ category: RiskCategory; regex: RegExp; scope?: 'name' }> = [
+  { category: 'process-execution', regex: /\b(shell|exec|command|terminal|bash|run[_ ]?(command|script))\b/i, scope: 'name' },
   { category: 'filesystem', regex: /\b(delete|remove|write|overwrite|move)[_ ]?(file|directory|folder|path)|filesystem\b/i },
   { category: 'network-egress', regex: /\b(http[_ ]?request|fetch[_ ]?url|curl|webhook|send[_ ]?request)\b/i },
 ];
@@ -155,7 +165,10 @@ export function checkCapabilities(surface: ToolSurface): CheckResult {
     for (const tool of surface.tools) {
       const text = `${tool.name} ${tool.description ?? ''}`;
       for (const risk of TOOL_TEXT_RISKS) {
-        if (risk.regex.test(text)) {
+        // Underscore is a word character, so \bshell\b never matches inside
+        // run_shell. Separators are normalised to spaces before name matching.
+        const subject = risk.scope === 'name' ? tool.name.replace(/[_-]+/g, ' ') : text;
+        if (risk.regex.test(subject)) {
           categories.add(risk.category);
           evidence.push({ label: `${tool.name}`, value: `${risk.category}` });
         }
