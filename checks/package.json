@@ -1,5 +1,5 @@
 {
-  "name": "@mcpscorecard/checks",
+  "name": "@mcprisk/checks",
   "version": "0.1.0",
   "description": "Open scoring model: the checks and scoring behind the MCP server security scorecard. Each check verifies a numbered section of the MCP Server Security Policy.",
   "license": "Apache-2.0",
