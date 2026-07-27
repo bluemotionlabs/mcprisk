@@ -1,5 +1,5 @@
 /**
- * @mcpscorecard/checks - the open scoring model.
+ * @mcprisk/checks - the open scoring model.
  *
  * runChecks() is the whole pipeline: resolve nothing, execute every
  * applicable check against an already-resolved ScanTarget, score the
