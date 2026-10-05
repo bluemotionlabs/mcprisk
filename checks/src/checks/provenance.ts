@@ -11,6 +11,15 @@ import type { CheckContext, CheckResult, Evidence } from '../types.js';
 import { errMsg, fetchWithTimeout } from '../utils.js';
 
 const REGISTRY_BASE = 'https://registry.modelcontextprotocol.io';
+/**
+ * The registry's `?search=` endpoint answers in under a second when its cache is
+ * warm and has been measured at 18 to 45 seconds when it is not. Every scan
+ * queries a different name, so a cold miss is the common case, and at the
+ * ordinary 10s scan timeout this check degraded on every server and deferred
+ * the whole scan. Callers that hold a local mirror pass ctx.registryLookup and
+ * skip this call; the long budget remains for the fallback path.
+ */
+const REGISTRY_TIMEOUT_MS = 45_000;
 /** Commits older than this are a warn; repos are often "done" but agents-facing code rots fast. */
 const STALE_PUSH_DAYS = 365;
 
@@ -20,6 +29,16 @@ export async function checkRegistryListed(ctx: CheckContext): Promise<CheckResul
     policyRef: '§1.1',
     title: 'Listed on the official MCP registry',
   };
+
+  if (ctx.registryLookup) {
+    try {
+      const local = await ctx.registryLookup(ctx.target);
+      if (local !== undefined) return local ? listedResult(base, local.name) : notListedResult(base);
+    } catch (err) {
+      // A failed local lookup is our fault, not the server's: retry later.
+      return { ...base, status: 'unverifiable', summary: `Registry lookup failed: ${errMsg(err)}`, evidence: [], degraded: true };
+    }
+  }
 
   const query = ctx.target.registryName ?? ctx.target.npmPackage ?? ctx.target.github?.repo;
   if (!query) {
@@ -34,7 +53,12 @@ export async function checkRegistryListed(ctx: CheckContext): Promise<CheckResul
   try {
     let match: Record<string, unknown> | undefined;
     for (const q of queries) {
-      const res = await fetchWithTimeout(ctx, `${REGISTRY_BASE}/v0/servers?search=${encodeURIComponent(q)}&limit=50`);
+      const res = await fetchWithTimeout(
+        ctx,
+        `${REGISTRY_BASE}/v0/servers?search=${encodeURIComponent(q)}&limit=50`,
+        undefined,
+        REGISTRY_TIMEOUT_MS,
+      );
       if (!res.ok) {
         return {
           ...base,
@@ -53,24 +77,31 @@ export async function checkRegistryListed(ctx: CheckContext): Promise<CheckResul
       if (match) break;
     }
 
-    if (match) {
-      const name = String(match['name'] ?? query);
-      return {
-        ...base,
-        status: 'pass',
-        summary: `Listed on registry.modelcontextprotocol.io as ${name}.`,
-        evidence: [{ label: 'Registry entry', value: name, url: `${REGISTRY_BASE}/v0/servers?search=${encodeURIComponent(name)}` }],
-      };
-    }
-    return {
-      ...base,
-      status: 'warn',
-      summary: 'Not found on the official MCP registry. Not disqualifying, but listed servers carry namespace-verified provenance.',
-      evidence: [],
-    };
+    if (match) return listedResult(base, String(match['name'] ?? query));
+    return notListedResult(base);
   } catch (err) {
     return { ...base, status: 'unverifiable', summary: `Registry unreachable: ${errMsg(err)}`, evidence: [], degraded: true };
   }
+}
+
+type CheckBase = Pick<CheckResult, 'id' | 'policyRef' | 'title'>;
+
+function listedResult(base: CheckBase, name: string): CheckResult {
+  return {
+    ...base,
+    status: 'pass',
+    summary: `Listed on registry.modelcontextprotocol.io as ${name}.`,
+    evidence: [{ label: 'Registry entry', value: name, url: `${REGISTRY_BASE}/v0/servers?search=${encodeURIComponent(name)}` }],
+  };
+}
+
+function notListedResult(base: CheckBase): CheckResult {
+  return {
+    ...base,
+    status: 'warn',
+    summary: 'Not found on the official MCP registry. Not disqualifying, but listed servers carry namespace-verified provenance.',
+    evidence: [],
+  };
 }
 
 export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
@@ -92,7 +123,7 @@ export async function checkRepoHealth(ctx: CheckContext): Promise<CheckResult> {
   try {
     const headers: Record<string, string> = {
       accept: 'application/vnd.github+json',
-      'user-agent': 'mcpscorecard-scanner',
+      'user-agent': 'mcprisk-scanner',
     };
     if (ctx.githubToken) headers.authorization = `Bearer ${ctx.githubToken}`;
 

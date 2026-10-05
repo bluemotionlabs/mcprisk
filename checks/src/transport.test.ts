@@ -159,23 +159,39 @@ describe('checkTransport auth probe classification', () => {
     return authCheck(await checkTransport(ctx, 'critical'));
   };
 
-  it('treats a Cloudflare origin error as unverifiable and retryable', async () => {
-    const res = await probe(530);
-    expect(res.status).toBe('unverifiable');
-    expect(res.degraded).toBe(true);
-    expect(res.summary).not.toMatch(/anonymous requests/i);
+  /**
+   * 530 was retryable until 2026-09-09. It is the proxy in front of a server
+   * whose DNS record is gone, which is permanent, and marking it degraded meant
+   * the scan never published, the server's last-scan date never advanced, and
+   * the next stale-rescan pass selected it again. 125 dead wishpool.app servers
+   * were taking the whole rescan budget that way.
+   */
+  it('treats an origin-unreachable error as observed, not retryable', async () => {
+    for (const status of [521, 523, 525, 526, 530]) {
+      const res = await probe(status);
+      expect(res.status).toBe('unverifiable');
+      expect(res.degraded).toBeUndefined();
+      expect(res.summary).toMatch(/unreachable/i);
+      expect(res.summary).not.toMatch(/anonymous requests/i);
+      expect(res.endpointGone).toBe(true);
+    }
   });
 
-  it('treats a 503 the same way', async () => {
-    const res = await probe(503);
-    expect(res.status).toBe('unverifiable');
-    expect(res.degraded).toBe(true);
+  it('still retries a 5xx that means the origin answered badly', async () => {
+    for (const status of [500, 502, 503, 520, 522, 524]) {
+      const res = await probe(status);
+      expect(res.status).toBe('unverifiable');
+      expect(res.degraded).toBe(true);
+      expect(res.endpointGone).toBeUndefined();
+    }
   });
 
   it('treats a missing route as unverifiable, not anonymous access', async () => {
     const res = await probe(404);
     expect(res.status).toBe('unverifiable');
     expect(res.degraded).toBeUndefined();
+    // A host that answers with 404 is still there; only a missing origin is gone.
+    expect(res.endpointGone).toBeUndefined();
     expect(res.summary).toMatch(/no mcp endpoint/i);
   });
 
