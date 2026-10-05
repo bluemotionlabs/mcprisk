@@ -51,6 +51,20 @@ describe('runChecks', () => {
     expect(report.checks.some((c) => c.id === 'provenance.registry-listed')).toBe(true);
     expect(report.checks.some((c) => c.id === 'provenance.repo-health')).toBe(true);
     expect(report.checks.some((c) => c.id === 'provenance.package-hygiene')).toBe(true);
+    expect(report.endpointUnreachable).toBeUndefined();
+  });
+
+  it('marks the report unreachable when no origin answers, and still scores it', async () => {
+    const fetchImpl = mockFetch([
+      { match: 'gone.example.com', response: () => textResponse(530) },
+      { match: 'registry.modelcontextprotocol.io', response: () => jsonResponse(200, { servers: [] }) },
+    ]);
+    const ctx = makeCtx({ remoteUrl: 'https://gone.example.com/mcp' }, fetchImpl);
+    const report = await runChecks(ctx);
+
+    expect(report.endpointUnreachable).toBe(true);
+    // The grade is kept for the record even though it is not published.
+    expect(report.grade).toBeDefined();
   });
 
   it('rates dangerous capabilities as risk and propagates that to auth gating', async () => {

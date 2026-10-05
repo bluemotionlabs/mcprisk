@@ -54,6 +54,7 @@ export async function runChecks(ctx: CheckContext): Promise<ScanReport> {
     tools: hasRealTools ? surface.tools : undefined,
     toolSource: surface.source,
     capabilityRisk,
+    endpointUnreachable: checks.some((c) => c.endpointGone) || undefined,
     createdAt: new Date().toISOString(),
   };
 }
