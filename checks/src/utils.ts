@@ -1,8 +1,18 @@
 import type { CheckContext } from './types.js';
 
-export async function fetchWithTimeout(ctx: CheckContext, url: string, init?: RequestInit): Promise<Response> {
+/**
+ * `timeoutMs` overrides the per-scan default for a single call. Most upstreams
+ * answer well inside it; the MCP registry's `?search=` is the exception, being
+ * fast when its cache is warm and tens of seconds when it is not.
+ */
+export async function fetchWithTimeout(
+  ctx: CheckContext,
+  url: string,
+  init?: RequestInit,
+  timeoutMs?: number,
+): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ctx.timeoutMs ?? 10_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? ctx.timeoutMs ?? 10_000);
   try {
     return await ctx.fetch(url, { ...init, signal: controller.signal });
   } finally {
