@@ -268,7 +268,7 @@ async function tryRemoteToolsList(
       params: {
         protocolVersion: '2025-06-18',
         capabilities: {},
-        clientInfo: { name: 'mcpscorecard', version: '0.1.0' },
+        clientInfo: { name: 'mcprisk', version: '0.1.0' },
       },
     });
     if (initRes.status === 401 || initRes.status === 403) return { authRequired: true };
