@@ -4,6 +4,44 @@ import { checkPackageHygiene } from './checks/package-hygiene.js';
 import { jsonResponse, makeCtx, mockFetch, textResponse } from './test-helpers.js';
 
 describe('checkRegistryListed', () => {
+  const offline = async () => {
+    throw new Error('network must not be used when a local lookup answers');
+  };
+
+  it('uses the local lookup instead of the network when it answers', async () => {
+    const ctx = { ...makeCtx({ npmPackage: '@acme/weather' }, offline), registryLookup: async () => ({ name: 'io.github.acme/weather' }) };
+    const res = await checkRegistryListed(ctx);
+    expect(res.status).toBe('pass');
+    expect(res.summary).toContain('io.github.acme/weather');
+  });
+
+  it('warns when the local lookup finds nothing', async () => {
+    const ctx = { ...makeCtx({ npmPackage: '@acme/weather' }, offline), registryLookup: async () => null };
+    const res = await checkRegistryListed(ctx);
+    expect(res.status).toBe('warn');
+  });
+
+  it('falls back to the network when there is no local copy', async () => {
+    const fetchImpl = mockFetch([
+      { match: 'registry.modelcontextprotocol.io', response: () => jsonResponse(200, { servers: [] }) },
+    ]);
+    const ctx = { ...makeCtx({ npmPackage: '@acme/weather' }, fetchImpl), registryLookup: async () => undefined };
+    const res = await checkRegistryListed(ctx);
+    expect(res.status).toBe('warn');
+  });
+
+  it('treats a failed local lookup as degraded, not as unlisted', async () => {
+    const ctx = {
+      ...makeCtx({ npmPackage: '@acme/weather' }, offline),
+      registryLookup: async () => {
+        throw new Error('D1 unavailable');
+      },
+    };
+    const res = await checkRegistryListed(ctx);
+    expect(res.status).toBe('unverifiable');
+    expect(res.degraded).toBe(true);
+  });
+
   it('is unverifiable when no identifier is available', async () => {
     const ctx = makeCtx({}, async () => textResponse(500));
     const res = await checkRegistryListed(ctx);

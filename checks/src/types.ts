@@ -36,6 +36,13 @@ export interface CheckResult {
    * rate limit because retrying cannot fix it; the token needs replacing.
    */
   credentialFailure?: boolean;
+  /**
+   * The remote endpoint has no origin behind it (DNS record gone, proxy reports
+   * no server). A property of the server, not of our scan, and distinct from
+   * `degraded`: retrying will not help, and the report is published but not
+   * graded. Only the transport probe sets it.
+   */
+  endpointGone?: boolean;
 }
 
 /** A scan target after input resolution, with whatever identifiers could be cross-resolved. */
@@ -120,6 +127,17 @@ export interface CheckContext {
   githubToken?: string;
   /** Per-request timeout in ms for outbound calls (default 10s) */
   timeoutMs?: number;
+  /**
+   * Local registry lookup, used by §1.1 in place of the registry's search API.
+   * Resolve to the matching entry, to null when the target is not listed, or to
+   * undefined when no local copy is available and the network should be asked.
+   */
+  registryLookup?: (target: ScanTarget) => Promise<RegistryMatch | null | undefined>;
+}
+
+/** A registry entry a target was found under. */
+export interface RegistryMatch {
+  name: string;
 }
 
 export type Grade = 'A' | 'B' | 'C' | 'D' | 'F';
@@ -141,5 +159,11 @@ export interface ScanReport {
    * folded into it. 'unknown' when the tool surface could not be inspected.
    */
   capabilityRisk: CapabilityRisk;
+  /**
+   * Set when the endpoint no longer has an origin. The score and grade are still
+   * computed and stored, so the record survives, but the server is shown as
+   * unreachable instead of graded and is left out of directory statistics.
+   */
+  endpointUnreachable?: boolean;
   createdAt: string;
 }

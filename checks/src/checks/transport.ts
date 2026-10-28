@@ -16,6 +16,24 @@ import type { CheckContext, CheckResult, CheckStatus } from '../types.js';
 import type { CapabilityRisk } from '../scoring.js';
 import { errMsg, fetchWithTimeout } from '../utils.js';
 
+/**
+ * Cloudflare's origin-error range: the proxy answering on behalf of an origin
+ * it could not reach. A server whose DNS record has been removed arrives at a
+ * Worker as HTTP 530 rather than as a thrown connection error.
+ *
+ * The distinction decides whether the scan is publishable. A thrown connection
+ * error is already reported as an unreachable endpoint and published, so
+ * treating its proxied twin as a degraded upstream instead made permanently
+ * dead servers defer, retry, get abandoned, and then be picked again by the
+ * next rescan pass: a server that never publishes a scan never leaves the
+ * stale set, so it is selected forever.
+ *
+ * 520, 522 and 524 stay out of this set deliberately. Those are the origin
+ * answering badly or slowly, which is transient often enough to be worth a
+ * retry. These are the ones that mean it did not answer at all.
+ */
+const ORIGIN_UNREACHABLE_STATUSES = new Set([521, 523, 525, 526, 530]);
+
 /** Auth probe outcome before capability gating is applied. */
 export type AuthProbeOutcome =
   | 'required-with-www-auth'
@@ -53,6 +71,9 @@ function authSummary(outcome: AuthProbeOutcome, status: CheckStatus, httpStatus?
   }
   if (outcome === 'unverifiable') {
     if (httpStatus === undefined) return 'Endpoint unreachable during auth probe.';
+    if (ORIGIN_UNREACHABLE_STATUSES.has(httpStatus)) {
+      return `Endpoint is unreachable (HTTP ${httpStatus}): no origin answered, so the server appears to be gone rather than temporarily failing.`;
+    }
     if (httpStatus >= 500) {
       return `Endpoint returned a server error (HTTP ${httpStatus}); whether it requires authentication could not be determined.`;
     }
@@ -127,8 +148,9 @@ export async function checkTransport(
       outcome = 'anonymous';
     } else {
       outcome = 'unverifiable';
-      // 5xx is the origin failing, which is transient often enough to retry.
-      degraded = res.status >= 500;
+      // 5xx is the origin failing, which is transient often enough to retry,
+      // unless it is the proxy reporting that there is no origin to reach.
+      degraded = res.status >= 500 && !ORIGIN_UNREACHABLE_STATUSES.has(res.status);
     }
 
     const status = resolveAuthRequiredStatus(outcome, capabilityRisk);
@@ -140,6 +162,7 @@ export async function checkTransport(
       summary: authSummary(outcome, status, res.status),
       evidence,
       degraded: degraded || undefined,
+      endpointGone: ORIGIN_UNREACHABLE_STATUSES.has(res.status) || undefined,
     });
   } catch (err) {
     results.push({
